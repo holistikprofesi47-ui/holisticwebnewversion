@@ -1,0 +1,1786 @@
+import React, { useState, useMemo, useEffect } from 'react';
+import {
+  FileText,
+  Plus,
+  Search,
+  Trash2,
+  Edit3,
+  Eye,
+  Calendar,
+  User,
+  Stethoscope,
+  Activity,
+  HeartPulse,
+  AlertCircle,
+  CheckCircle2,
+  ClipboardList,
+  Printer,
+  Sparkles,
+  ChevronRight,
+  ChevronDown,
+  ChevronUp,
+  Filter,
+  Users,
+  Layers,
+  List,
+  Clock,
+  TrendingDown,
+  TrendingUp,
+  Phone,
+  Mail,
+  History,
+  X
+} from 'lucide-react';
+import { ClinicalProgressNote, Appointment, UserProfile, Therapy } from '../types';
+import { formatIndonesianDate, getRegisteredPatients } from '../utils/storage';
+import { getAllUserProfilesFromFirestore } from '../services/firebaseFirestore';
+import { formatAge, getAgeParts, getGenderBadgeClass, getPatientDisplayName } from '../utils/patientDemographics';
+
+interface ClinicalProgressNotesManagerProps {
+  progressNotes: ClinicalProgressNote[];
+  onAddNote: (note: ClinicalProgressNote) => void | Promise<void>;
+  onUpdateNote: (note: ClinicalProgressNote) => void | Promise<void>;
+  onDeleteNote: (id: string) => void;
+  appointments: Appointment[];
+  therapies: Therapy[];
+  initialSelectedPatient?: string | null;
+  onClearInitialPatient?: () => void;
+}
+
+interface PatientGroup {
+  key: string;
+  patientName: string;
+  patientNumber: string;
+  patientPhone: string;
+  patientEmail: string;
+  patientId: string;
+  patient?: UserProfile;
+  notes: ClinicalProgressNote[];
+  totalVisits: number;
+  latestVisitDate: string;
+  latestTherapy: string;
+  latestChiefComplaint: string;
+  latestProgressFollowUp: string;
+  latestPainScale?: number;
+  initialPainScale?: number;
+  painTrend?: number;
+  latestVitalSigns?: ClinicalProgressNote['vitalSigns'];
+  uniqueTherapies: string[];
+  uniqueNurses: string[];
+}
+
+const getLocalDateKey = () => {
+  const now = new Date();
+  const month = String(now.getMonth() + 1).padStart(2, '0');
+  const day = String(now.getDate()).padStart(2, '0');
+  return `${now.getFullYear()}-${month}-${day}`;
+};
+
+export const ClinicalProgressNotesManager: React.FC<ClinicalProgressNotesManagerProps> = ({
+  progressNotes,
+  onAddNote,
+  onUpdateNote,
+  onDeleteNote,
+  appointments,
+  therapies,
+  initialSelectedPatient,
+  onClearInitialPatient
+}) => {
+  const [searchQuery, setSearchQuery] = useState('');
+  const [selectedPatientFilter, setSelectedPatientFilter] = useState<string>(initialSelectedPatient || 'Semua');
+  const [viewMode, setViewMode] = useState<'grouped' | 'list'>('grouped');
+  const [expandedPatientKeys, setExpandedPatientKeys] = useState<string[]>([]);
+  const [showAddModal, setShowAddModal] = useState(false);
+  const [isSavingNote, setIsSavingNote] = useState(false);
+  const [editingNote, setEditingNote] = useState<ClinicalProgressNote | null>(null);
+  const [detailNote, setDetailNote] = useState<ClinicalProgressNote | null>(null);
+  const [noteToDelete, setNoteToDelete] = useState<ClinicalProgressNote | null>(null);
+  const [toastMessage, setToastMessage] = useState<string | null>(null);
+  const [cloudPatientProfiles, setCloudPatientProfiles] = useState<UserProfile[]>([]);
+  const [todayKey, setTodayKey] = useState(getLocalDateKey);
+
+  // Form State
+  const [formPatientId, setFormPatientId] = useState<string>('');
+  const [formPatientName, setFormPatientName] = useState('');
+  const [formPatientNumber, setFormPatientNumber] = useState('');
+  const [formPatientPhone, setFormPatientPhone] = useState('');
+  const [formPatientEmail, setFormPatientEmail] = useState('');
+  const [formTherapyName, setFormTherapyName] = useState('');
+  const [formVisitDate, setFormVisitDate] = useState(getLocalDateKey);
+  const [formBookingCode, setFormBookingCode] = useState('');
+  const [formAppointmentId, setFormAppointmentId] = useState('');
+  const [formChiefComplaint, setFormChiefComplaint] = useState('');
+  const [formAssessment, setFormAssessment] = useState('');
+  const [formIntervention, setFormIntervention] = useState('');
+  const [formProgressFollowUp, setFormProgressFollowUp] = useState('');
+  const [formNurseName, setFormNurseName] = useState('Ns. Staf Keperawatan Komplementer, S.Kep.');
+  const [formBP, setFormBP] = useState('120/80 mmHg');
+  const [formPulse, setFormPulse] = useState('78 x/menit');
+  const [formRR, setFormRR] = useState('18 x/menit');
+  const [formPainScale, setFormPainScale] = useState<number>(3);
+
+  // Registered Patients List for seamless profile linkage
+  const registeredPatientsList = useMemo(() => {
+    const profiles = getRegisteredPatients();
+    cloudPatientProfiles.forEach((cloudProfile) => {
+      const index = profiles.findIndex(
+        (profile) =>
+          profile.id === cloudProfile.id ||
+          (profile.email && cloudProfile.email && profile.email.toLowerCase() === cloudProfile.email.toLowerCase())
+      );
+      if (index >= 0) profiles[index] = { ...profiles[index], ...cloudProfile };
+      else profiles.push(cloudProfile);
+    });
+    return profiles;
+  }, [cloudPatientProfiles]);
+
+  useEffect(() => {
+    let active = true;
+    getAllUserProfilesFromFirestore().then((profiles) => {
+      if (active) setCloudPatientProfiles(profiles);
+    });
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    const now = new Date();
+    const nextMidnight = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1);
+    const timeoutId = window.setTimeout(
+      () => setTodayKey(getLocalDateKey()),
+      nextMidnight.getTime() - now.getTime()
+    );
+    return () => window.clearTimeout(timeoutId);
+  }, [todayKey]);
+
+  const getProfileForNote = (note: ClinicalProgressNote): UserProfile | undefined => {
+    const matchedByIdentifier = registeredPatientsList.find((profile) =>
+      (note.patientId && profile.id === note.patientId) ||
+      (note.patientEmail && profile.email?.toLowerCase() === note.patientEmail.toLowerCase()) ||
+      (note.patientNumber && profile.patientNumber?.toLowerCase() === note.patientNumber.toLowerCase()) ||
+      (note.patientPhone && profile.phone?.replace(/\D/g, '') === note.patientPhone.replace(/\D/g, ''))
+    );
+    if (matchedByIdentifier) return matchedByIdentifier;
+
+    const matchingNames = registeredPatientsList.filter((profile) =>
+      profile.name.trim().replace(/^(Tn\.|Nn\.|Ny\.|An\.)\s*/i, '').toLowerCase() ===
+        note.patientName.trim().replace(/^(Tn\.|Nn\.|Ny\.|An\.)\s*/i, '').toLowerCase()
+    );
+    return matchingNames.length === 1 ? matchingNames[0] : undefined;
+  };
+
+  // Unique list of patients for filter
+  const patientOptions = useMemo(() => {
+    const names = new Set<string>();
+    progressNotes.forEach(n => names.add(n.patientName));
+    appointments.forEach(a => names.add(a.userName));
+    registeredPatientsList.forEach(p => names.add(p.name));
+    return Array.from(names);
+  }, [progressNotes, appointments, registeredPatientsList]);
+
+  // Filtered Notes
+  const filteredNotes = useMemo(() => {
+    return progressNotes.filter(note => {
+      const matchPatient = selectedPatientFilter === 'Semua' || note.patientName === selectedPatientFilter;
+      const query = searchQuery.trim().toLocaleLowerCase('id');
+      const searchableText = [
+        note.patientName,
+        note.patientNumber,
+        note.chiefComplaint,
+        note.therapyName,
+        note.assessment,
+        note.intervention,
+        note.progressFollowUp,
+        note.nurseName,
+        note.bookingCode,
+        note.patientPhone,
+        note.patientEmail
+      ]
+        .filter(Boolean)
+        .join(' ')
+        .toLocaleLowerCase('id');
+      const matchSearch = !query || searchableText.includes(query);
+
+      return matchPatient && matchSearch;
+    });
+  }, [progressNotes, selectedPatientFilter, searchQuery]);
+
+  // Group notes per patient
+  const patientGroups = useMemo(() => {
+    const map = new Map<string, PatientGroup>();
+
+    // Sort filteredNotes by visit date descending first
+    const sorted = [...filteredNotes].sort(
+      (a, b) => new Date(b.visitDate).getTime() - new Date(a.visitDate).getTime()
+    );
+
+    sorted.forEach((note) => {
+      const key = (note.patientNumber || note.patientName || '').trim().toLowerCase();
+      const patient = getProfileForNote(note);
+      
+      if (!map.has(key)) {
+        map.set(key, {
+          key,
+          patientName: note.patientName,
+          patientNumber: note.patientNumber || 'RM-HNC',
+          patientPhone: note.patientPhone || '',
+          patientEmail: note.patientEmail || '',
+          patientId: note.patientId || '',
+          patient,
+          notes: [note],
+          totalVisits: 1,
+          latestVisitDate: note.visitDate,
+          latestTherapy: note.therapyName,
+          latestChiefComplaint: note.chiefComplaint,
+          latestProgressFollowUp: note.progressFollowUp,
+          latestPainScale: note.vitalSigns?.painScale,
+          latestVitalSigns: note.vitalSigns,
+          uniqueTherapies: [note.therapyName],
+          uniqueNurses: [note.nurseName]
+        });
+      } else {
+        const group = map.get(key)!;
+        group.notes.push(note);
+        group.totalVisits = group.notes.length;
+        if (!group.patientPhone && note.patientPhone) group.patientPhone = note.patientPhone;
+        if (!group.patientEmail && note.patientEmail) group.patientEmail = note.patientEmail;
+        if (!group.patientId && note.patientId) group.patientId = note.patientId;
+        if (!group.patient && patient) group.patient = patient;
+        if (!group.uniqueTherapies.includes(note.therapyName)) group.uniqueTherapies.push(note.therapyName);
+        if (!group.uniqueNurses.includes(note.nurseName)) group.uniqueNurses.push(note.nurseName);
+      }
+    });
+
+    // Calculate initial pain scale and improvement trend
+    return Array.from(map.values()).map((g) => {
+      const oldestNote = g.notes[g.notes.length - 1];
+      g.initialPainScale = oldestNote?.vitalSigns?.painScale;
+      if (g.initialPainScale !== undefined && g.latestPainScale !== undefined) {
+        g.painTrend = g.initialPainScale - g.latestPainScale;
+      }
+      return g;
+    });
+  }, [filteredNotes, registeredPatientsList]);
+
+  const completedAppointmentsToday = useMemo(() => {
+    const completedToday = appointments.filter(
+      (appointment) =>
+        appointment.status === 'Selesai' &&
+        appointment.date?.split('T')[0] === todayKey
+    );
+
+    return completedToday.map((appointment) => {
+      const note = progressNotes.find((candidate) => {
+        if (candidate.appointmentId && candidate.appointmentId === appointment.id) return true;
+        if (
+          candidate.bookingCode &&
+          appointment.bookingCode &&
+          candidate.bookingCode.trim().toLowerCase() === appointment.bookingCode.trim().toLowerCase()
+        ) return true;
+
+        const samePatient =
+          (appointment.userId && candidate.patientId === appointment.userId) ||
+          (appointment.patientNumber &&
+            candidate.patientNumber?.trim().toLowerCase() === appointment.patientNumber.trim().toLowerCase()) ||
+          (appointment.userPhone &&
+            candidate.patientPhone?.replace(/\D/g, '') === appointment.userPhone.replace(/\D/g, '')) ||
+          candidate.patientName.trim().toLocaleLowerCase('id') === appointment.userName.trim().toLocaleLowerCase('id');
+
+        return Boolean(
+          samePatient &&
+          candidate.visitDate?.split('T')[0] === appointment.date?.split('T')[0] &&
+          candidate.therapyName.trim().toLocaleLowerCase('id') === appointment.therapyName.trim().toLocaleLowerCase('id')
+        );
+      });
+
+      return { appointment, note };
+    });
+  }, [appointments, progressNotes, todayKey]);
+
+  const pendingTodayCount = completedAppointmentsToday.filter(({ note }) => !note).length;
+
+  // Expand all / collapse all handlers
+  const handleToggleExpandPatient = (key: string) => {
+    setExpandedPatientKeys((prev) =>
+      prev.includes(key) ? prev.filter((k) => k !== key) : [...prev, key]
+    );
+  };
+
+  const handleExpandAll = () => {
+    setExpandedPatientKeys(patientGroups.map((g) => g.key));
+  };
+
+  const handleCollapseAll = () => {
+    setExpandedPatientKeys([]);
+  };
+
+  const showToast = (msg: string) => {
+    setToastMessage(msg);
+    setTimeout(() => {
+      setToastMessage(null);
+    }, 4000);
+  };
+
+  const handleOpenAddModal = (fromAppointment?: Appointment) => {
+    if (fromAppointment) {
+      setFormPatientId(fromAppointment.userId || '');
+      setFormPatientName(fromAppointment.userName);
+      setFormPatientNumber(fromAppointment.patientNumber || `RM-HNC-${Math.floor(1000 + Math.random() * 9000)}`);
+      setFormPatientPhone(fromAppointment.userPhone || '');
+      setFormPatientEmail(fromAppointment.userEmail || '');
+      setFormTherapyName(fromAppointment.therapyName);
+      setFormVisitDate(fromAppointment.date || getLocalDateKey());
+      setFormBookingCode(fromAppointment.bookingCode);
+      setFormAppointmentId(fromAppointment.id);
+      setFormChiefComplaint(fromAppointment.notes ? `Keluhan saat reservasi: ${fromAppointment.notes}` : '');
+    } else {
+      setFormPatientId('');
+      setFormPatientName('');
+      setFormPatientNumber(`RM-HNC-${Math.floor(1000 + Math.random() * 9000)}`);
+      setFormPatientPhone('');
+      setFormPatientEmail('');
+      setFormTherapyName(therapies[0]?.name || 'Akupresur Relaksasi');
+      setFormVisitDate(getLocalDateKey());
+      setFormBookingCode('');
+      setFormAppointmentId('');
+      setFormChiefComplaint('');
+    }
+
+    setFormAssessment('');
+    setFormIntervention('');
+    setFormProgressFollowUp('');
+    setFormNurseName('Ns. Staf Keperawatan Komplementer, S.Kep.');
+    setFormBP('120/80 mmHg');
+    setFormPulse('78 x/menit');
+    setFormRR('18 x/menit');
+    setFormPainScale(3);
+    setEditingNote(null);
+    setShowAddModal(true);
+  };
+
+  const handleOpenAddModalForPatientGroup = (group: PatientGroup) => {
+    setFormPatientId(group.patientId || '');
+    setFormPatientName(group.patientName);
+    setFormPatientNumber(group.patientNumber);
+    setFormPatientPhone(group.patientPhone || '');
+    setFormPatientEmail(group.patientEmail || '');
+    setFormTherapyName(group.latestTherapy || therapies[0]?.name || 'Akupresur Relaksasi');
+    setFormVisitDate(getLocalDateKey());
+    setFormBookingCode('');
+    setFormAppointmentId('');
+    setFormChiefComplaint('');
+    setFormAssessment('');
+    setFormIntervention('');
+    setFormProgressFollowUp('');
+    setFormNurseName('Ns. Staf Keperawatan Komplementer, S.Kep.');
+    setFormBP('120/80 mmHg');
+    setFormPulse('78 x/menit');
+    setFormRR('18 x/menit');
+    setFormPainScale(3);
+    setEditingNote(null);
+    setShowAddModal(true);
+  };
+
+  const handleOpenEditModal = (note: ClinicalProgressNote) => {
+    setEditingNote(note);
+    setFormPatientId(note.patientId || '');
+    setFormPatientName(note.patientName);
+    setFormPatientNumber(note.patientNumber);
+    setFormPatientPhone(note.patientPhone || '');
+    setFormPatientEmail(note.patientEmail || '');
+    setFormTherapyName(note.therapyName);
+    setFormVisitDate(note.visitDate);
+    setFormBookingCode(note.bookingCode || '');
+    setFormAppointmentId(note.appointmentId || '');
+    setFormChiefComplaint(note.chiefComplaint);
+    setFormAssessment(note.assessment);
+    setFormIntervention(note.intervention);
+    setFormProgressFollowUp(note.progressFollowUp);
+    setFormNurseName(note.nurseName);
+    setFormBP(note.vitalSigns?.bloodPressure || '120/80 mmHg');
+    setFormPulse(note.vitalSigns?.pulseRate || '78 x/menit');
+    setFormRR(note.vitalSigns?.respiratoryRate || '18 x/menit');
+    setFormPainScale(note.vitalSigns?.painScale ?? 3);
+    setShowAddModal(true);
+  };
+
+  const handleQuickSelectPatientOrApp = (selectedValue: string) => {
+    if (!selectedValue) return;
+
+    if (selectedValue.startsWith('app:')) {
+      const appId = selectedValue.replace('app:', '');
+      const found = appointments.find(a => a.id === appId);
+      if (found) {
+        setFormPatientId(found.userId || '');
+        setFormPatientName(found.userName);
+        setFormPatientNumber(found.patientNumber || `RM-HNC-${Math.floor(1000 + Math.random() * 9000)}`);
+        setFormPatientPhone(found.userPhone || '');
+        setFormPatientEmail(found.userEmail || '');
+        setFormTherapyName(found.therapyName);
+        setFormVisitDate(found.date);
+        setFormBookingCode(found.bookingCode);
+        setFormAppointmentId(found.id);
+        if (found.notes && !formChiefComplaint) {
+          setFormChiefComplaint(`Keluhan: ${found.notes}`);
+        }
+      }
+    } else if (selectedValue.startsWith('patient:')) {
+      const patientId = selectedValue.replace('patient:', '');
+      const found = registeredPatientsList.find(p => p.id === patientId || p.email === patientId);
+      if (found) {
+        setFormPatientId(found.id || '');
+        setFormPatientName(found.name);
+        setFormPatientNumber(found.patientNumber || `RM-HNC-${Math.floor(1000 + Math.random() * 9000)}`);
+        setFormPatientPhone(found.phone || '');
+        setFormPatientEmail(found.email || '');
+      }
+    }
+  };
+
+  const handleSaveForm = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (isSavingNote) return;
+    if (!formPatientName.trim() || !formChiefComplaint.trim() || !formAssessment.trim() || !formIntervention.trim() || !formProgressFollowUp.trim()) {
+      alert('Mohon lengkapi kolom Tanggal Kunjungan, Nama Pasien, Keluhan Utama, Hasil Pengkajian, Intervensi, dan Catatan Perkembangan.');
+      return;
+    }
+    setIsSavingNote(true);
+
+    // Auto-resolve patient ID and RM from registered directory if not filled
+    let finalPatientId = formPatientId;
+    let finalPatientNumber = formPatientNumber.trim();
+    let finalPatientEmail = formPatientEmail.trim();
+    let finalPatientPhone = formPatientPhone.trim();
+
+    const matchedRegistered = registeredPatientsList.find(
+      p =>
+        (finalPatientEmail && p.email && p.email.toLowerCase() === finalPatientEmail.toLowerCase()) ||
+        (finalPatientPhone && p.phone && p.phone.replace(/\D/g, '') === finalPatientPhone.replace(/\D/g, '')) ||
+        (p.name && p.name.trim().toLowerCase() === formPatientName.trim().toLowerCase())
+    );
+
+    if (matchedRegistered) {
+      if (!finalPatientId && matchedRegistered.id) finalPatientId = matchedRegistered.id;
+      if (!finalPatientNumber && matchedRegistered.patientNumber) finalPatientNumber = matchedRegistered.patientNumber;
+      if (!finalPatientEmail && matchedRegistered.email) finalPatientEmail = matchedRegistered.email;
+      if (!finalPatientPhone && matchedRegistered.phone) finalPatientPhone = matchedRegistered.phone;
+    }
+
+    if (editingNote) {
+      const updated: ClinicalProgressNote = {
+        ...editingNote,
+        patientId: finalPatientId || editingNote.patientId,
+        patientName: formPatientName.trim(),
+        patientNumber: finalPatientNumber || editingNote.patientNumber,
+        patientPhone: finalPatientPhone,
+        patientEmail: finalPatientEmail,
+        therapyName: formTherapyName.trim(),
+        visitDate: formVisitDate,
+        appointmentId: formAppointmentId || undefined,
+        bookingCode: formBookingCode.trim() || undefined,
+        chiefComplaint: formChiefComplaint.trim(),
+        assessment: formAssessment.trim(),
+        vitalSigns: {
+          bloodPressure: formBP.trim(),
+          pulseRate: formPulse.trim(),
+          respiratoryRate: formRR.trim(),
+          painScale: formPainScale
+        },
+        intervention: formIntervention.trim(),
+        progressFollowUp: formProgressFollowUp.trim(),
+        nurseName: formNurseName.trim()
+      };
+      try {
+        await onUpdateNote(updated);
+      } catch (error) {
+        console.error('Gagal menyimpan catatan perkembangan ke Firebase:', error);
+        alert('Catatan perkembangan gagal disimpan ke Firebase. Periksa koneksi, lalu coba lagi.');
+        setIsSavingNote(false);
+        return;
+      }
+
+      showToast(`Catatan perkembangan pasien ${updated.patientName} berhasil diperbarui dan tersedia di profil pasien.`);
+    } else {
+      const newNote: ClinicalProgressNote = {
+        id: `cpn-${Date.now()}`,
+        patientId: finalPatientId || `patient-${Date.now()}`,
+        patientName: formPatientName.trim(),
+        patientNumber: finalPatientNumber || `RM-HNC-${Math.floor(1000 + Math.random() * 9000)}`,
+        patientPhone: finalPatientPhone,
+        patientEmail: finalPatientEmail,
+        therapyName: formTherapyName.trim(),
+        visitDate: formVisitDate,
+        appointmentId: formAppointmentId || undefined,
+        bookingCode: formBookingCode.trim() || undefined,
+        chiefComplaint: formChiefComplaint.trim(),
+        assessment: formAssessment.trim(),
+        vitalSigns: {
+          bloodPressure: formBP.trim(),
+          pulseRate: formPulse.trim(),
+          respiratoryRate: formRR.trim(),
+          painScale: formPainScale
+        },
+        intervention: formIntervention.trim(),
+        progressFollowUp: formProgressFollowUp.trim(),
+        nurseName: formNurseName.trim(),
+        createdAt: new Date().toISOString()
+      };
+      try {
+        await onAddNote(newNote);
+      } catch (error) {
+        console.error('Gagal menyimpan catatan perkembangan ke Firebase:', error);
+        alert('Catatan perkembangan gagal disimpan ke Firebase. Periksa koneksi, lalu coba lagi.');
+        setIsSavingNote(false);
+        return;
+      }
+
+      showToast(`Catatan perkembangan untuk ${newNote.patientName} berhasil disimpan dan tersedia di profil pasien.`);
+    }
+
+    setShowAddModal(false);
+    setEditingNote(null);
+    setIsSavingNote(false);
+  };
+
+  const handleConfirmDeleteNote = () => {
+    if (!noteToDelete) return;
+    const name = noteToDelete.patientName;
+    onDeleteNote(noteToDelete.id);
+    setNoteToDelete(null);
+    if (detailNote && detailNote.id === noteToDelete.id) {
+      setDetailNote(null);
+    }
+    showToast(`Catatan perkembangan pasien ${name} telah dihapus.`);
+  };
+
+  const handlePrintNote = () => {
+    window.print();
+  };
+
+  const detailPatient = detailNote ? getProfileForNote(detailNote) : undefined;
+  const detailPatientAge = detailPatient?.dateOfBirth
+    ? formatAge(getAgeParts(detailPatient.dateOfBirth))
+    : '';
+
+  return (
+    <div className="space-y-5">
+      {/* Notification Toast */}
+      {toastMessage && (
+        <div className="bg-emerald-50 text-emerald-900 px-4 py-3 rounded-lg text-xs flex items-center justify-between border border-emerald-200">
+          <div className="flex items-center gap-2.5">
+            <CheckCircle2 className="w-4 h-4 text-emerald-700 shrink-0" strokeWidth={1.75} />
+            <span className="font-medium">{toastMessage}</span>
+          </div>
+          <button
+            onClick={() => setToastMessage(null)}
+            className="text-emerald-800 hover:text-emerald-950 text-xs font-semibold cursor-pointer"
+          >
+            Tutup
+          </button>
+        </div>
+      )}
+
+      {pendingTodayCount > 0 && (
+        <div
+          role="alert"
+          className="flex items-start gap-3 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-amber-900"
+        >
+          <AlertCircle className="mt-0.5 h-4 w-4 shrink-0 text-amber-700" strokeWidth={1.75} />
+          <p className="text-xs sm:text-sm font-medium">
+            Perhatian: Terdapat <span className="font-semibold tabular-nums">{pendingTodayCount}</span> pasien selesai terapi hari ini yang belum diisi catatan perkembangannya.
+          </p>
+        </div>
+      )}
+
+      {/* Header Banner */}
+      <div className="bg-white rounded-xl p-5 sm:p-6 text-stone-900 border border-stone-200 space-y-5">
+        <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
+          <div className="space-y-1.5 max-w-xl">
+            <div className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-md bg-emerald-50 text-emerald-800 border border-emerald-200 text-[10px] font-semibold uppercase tracking-wider">
+              <ClipboardList className="w-3.5 h-3.5" strokeWidth={1.75} />
+              <span>Dokumentasi Rekam Klinis Keperawatan</span>
+            </div>
+            <h2 className="text-lg sm:text-xl font-semibold tracking-tight text-stone-900">
+              Catatan Perkembangan Kontrol Kunjungan Lanjutan
+            </h2>
+            <p className="text-xs text-stone-500 leading-relaxed">
+              Catatan yang disimpan di sini menjadi riwayat perkembangan pasien dan dapat dibaca pasien melalui akunnya.
+            </p>
+          </div>
+
+          <div className="flex items-center gap-2 shrink-0">
+            <button
+              onClick={() => handleOpenAddModal()}
+              className="bg-emerald-800 hover:bg-emerald-900 text-white font-medium text-xs px-4 py-2.5 rounded-lg transition-colors flex items-center gap-2 cursor-pointer"
+            >
+              <Plus className="w-4 h-4" strokeWidth={1.75} />
+              <span>Tulis Catatan Perkembangan Baru</span>
+            </button>
+          </div>
+        </div>
+
+        {/* Quick Clinical Metrics Counter Bar */}
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 pt-4 border-t border-stone-200 text-xs">
+          <div className="bg-stone-50/70 p-3.5 rounded-xl border border-stone-200">
+            <span className="text-[10px] uppercase font-medium tracking-wider text-stone-500 block">Total Pasien Terpantau</span>
+            <div className="flex items-baseline gap-1.5 mt-1">
+              <span className="text-lg font-semibold tracking-tight text-stone-900 tabular-nums">{patientGroups.length}</span>
+              <span className="text-[11px] text-stone-500">Orang</span>
+            </div>
+          </div>
+
+          <div className="bg-stone-50/70 p-3.5 rounded-xl border border-stone-200">
+            <span className="text-[10px] uppercase font-medium tracking-wider text-stone-500 block">Total Catatan Perkembangan</span>
+            <div className="flex items-baseline gap-1.5 mt-1">
+              <span className="text-lg font-semibold tracking-tight text-stone-900 tabular-nums">{filteredNotes.length}</span>
+              <span className="text-[11px] text-stone-500">Rekam Kunjungan</span>
+            </div>
+          </div>
+
+          <div className="bg-stone-50/70 p-3.5 rounded-xl border border-stone-200">
+            <span className="text-[10px] uppercase font-medium tracking-wider text-stone-500 block">Rata-Rata Sesi Kontrol</span>
+            <div className="flex items-baseline gap-1.5 mt-1">
+              <span className="text-lg font-semibold tracking-tight text-stone-900 tabular-nums">
+                {patientGroups.length > 0 ? (filteredNotes.length / patientGroups.length).toFixed(1) : '0'}
+              </span>
+              <span className="text-[11px] text-stone-500">Sesi/Pasien</span>
+            </div>
+          </div>
+
+          <div className="bg-stone-50/70 p-3.5 rounded-xl border border-stone-200">
+            <span className="text-[10px] uppercase font-medium tracking-wider text-stone-500 block">Sinkronisasi Profil</span>
+            <div className="flex items-center gap-1.5 mt-1.5 text-emerald-800 font-medium text-xs">
+              <span className="w-2 h-2 rounded-full bg-emerald-700"></span>
+              <span>Aktif Real-Time</span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {completedAppointmentsToday.length > 0 && (
+        <section className="space-y-3 rounded-xl border border-stone-200 bg-white p-4 sm:p-5">
+          <div className="flex flex-col gap-1 sm:flex-row sm:items-end sm:justify-between">
+            <div>
+              <h3 className="font-semibold tracking-tight text-stone-900 text-sm sm:text-base">Pasien Selesai Terapi Hari Ini</h3>
+              <p className="text-xs text-stone-500">Catatan yang disimpan di sini masuk ke riwayat dan dapat dibaca pasien di akunnya.</p>
+            </div>
+            <span className="text-xs font-medium text-stone-500 tabular-nums">
+              {completedAppointmentsToday.length} kunjungan
+            </span>
+          </div>
+
+          <div className="grid gap-3 md:grid-cols-2">
+            {completedAppointmentsToday.map(({ appointment, note }) => (
+              <div
+                key={appointment.id}
+                className="flex flex-col justify-between gap-3 rounded-xl border border-stone-200 bg-stone-50/70 p-4 sm:flex-row sm:items-center"
+              >
+                <div className="min-w-0 space-y-1">
+                  <p className="truncate text-sm font-semibold text-stone-900">{appointment.userName}</p>
+                  <p className="text-xs text-stone-600">
+                    {appointment.therapyName} <span className="text-stone-400">·</span> <span className="tabular-nums">{appointment.timeSlot}</span>
+                    {appointment.bookingCode && (
+                      <span className="ml-2 font-mono text-[10px] text-stone-500 tabular-nums">{appointment.bookingCode}</span>
+                    )}
+                  </p>
+                  <span
+                    className={`inline-flex items-center gap-1 rounded-md border px-2 py-0.5 text-[10px] font-medium ${
+                      note
+                        ? 'bg-emerald-50 text-emerald-800 border-emerald-200'
+                        : 'bg-amber-50 text-amber-800 border-amber-200'
+                    }`}
+                  >
+                    {note ? <CheckCircle2 className="h-3 w-3" strokeWidth={1.75} /> : <Clock className="h-3 w-3" strokeWidth={1.75} />}
+                    {note ? 'Sudah Diberikan Catatan Perkembangan' : 'Belum Diberikan Catatan Perkembangan'}
+                  </span>
+                </div>
+
+                {note ? (
+                  <button
+                    type="button"
+                    onClick={() => setDetailNote(note)}
+                    className="shrink-0 rounded-lg border border-stone-200 bg-white px-3 py-2 text-xs font-medium text-emerald-800 transition-colors hover:bg-stone-50 cursor-pointer"
+                  >
+                    Lihat Catatan
+                  </button>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={() => handleOpenAddModal(appointment)}
+                    className="inline-flex shrink-0 items-center justify-center gap-1.5 rounded-lg bg-emerald-800 px-3.5 py-2 text-xs font-medium text-white transition-colors hover:bg-emerald-900 cursor-pointer"
+                  >
+                    <Plus className="h-3.5 w-3.5" strokeWidth={1.75} />
+                    <span>Catatan Perkembangan Baru</span>
+                  </button>
+                )}
+              </div>
+            ))}
+          </div>
+        </section>
+      )}
+
+      {/* Filter, Search, & View Mode Bar */}
+      <div className="flex flex-col lg:flex-row gap-3 items-center justify-between bg-white p-4 rounded-xl border border-stone-200">
+        <div className="relative w-full lg:w-80">
+          <Search className="w-4 h-4 text-stone-400 absolute left-3 top-2.5" strokeWidth={1.75} />
+          <input
+            type="text"
+            placeholder="Cari pasien, no. RM, keluhan, terapi..."
+            value={searchQuery}
+            onChange={(e) => setSearchQuery(e.target.value)}
+            className="w-full bg-white border border-stone-200 rounded-lg pl-9 pr-8 py-2 text-xs text-stone-800 focus:outline-none focus:border-emerald-800"
+          />
+          {searchQuery && (
+            <button
+              onClick={() => setSearchQuery('')}
+              className="absolute right-2.5 top-2.5 text-stone-400 hover:text-stone-700 text-xs cursor-pointer"
+            >
+              <X className="w-3.5 h-3.5" strokeWidth={1.75} />
+            </button>
+          )}
+        </div>
+
+        <div className="flex items-center gap-2.5 w-full lg:w-auto flex-wrap justify-between lg:justify-end">
+          {/* Patient Selector Filter */}
+          <div className="flex items-center gap-1.5 text-xs text-stone-500 shrink-0 font-medium">
+            <Filter className="w-3.5 h-3.5 text-stone-400" strokeWidth={1.75} />
+            <select
+              value={selectedPatientFilter}
+              onChange={(e) => {
+                setSelectedPatientFilter(e.target.value);
+                if (onClearInitialPatient) onClearInitialPatient();
+              }}
+              className="bg-white border border-stone-200 text-xs font-medium text-stone-800 rounded-lg px-3 py-2 focus:outline-none focus:border-emerald-800 cursor-pointer"
+            >
+              <option value="Semua">Semua Pasien ({progressNotes.length} Catatan)</option>
+              {patientOptions.map((name) => (
+                <option key={name} value={name}>
+                  {name}
+                </option>
+              ))}
+            </select>
+          </div>
+
+          {/* View Mode Toggle Buttons */}
+          <div className="flex items-center bg-stone-100 p-1 rounded-lg border border-stone-200">
+            <button
+              onClick={() => setViewMode('grouped')}
+              className={`px-3 py-1.5 rounded-md text-xs font-medium transition-colors flex items-center gap-1.5 cursor-pointer ${
+                viewMode === 'grouped'
+                  ? 'bg-emerald-800 text-white'
+                  : 'text-stone-600 hover:text-stone-900'
+              }`}
+              title="Kelompokkan Catatan Berdasarkan Pasien"
+            >
+              <Layers className="w-3.5 h-3.5" strokeWidth={1.75} />
+              <span>Daftar Per Pasien</span>
+              <span className={`px-1.5 py-0.2 rounded text-[10px] font-mono tabular-nums ${
+                viewMode === 'grouped' ? 'bg-emerald-900 text-emerald-100' : 'bg-stone-200 text-stone-700'
+              }`}>
+                {patientGroups.length}
+              </span>
+            </button>
+
+            <button
+              onClick={() => setViewMode('list')}
+              className={`px-3 py-1.5 rounded-md text-xs font-medium transition-colors flex items-center gap-1.5 cursor-pointer ${
+                viewMode === 'list'
+                  ? 'bg-emerald-800 text-white'
+                  : 'text-stone-600 hover:text-stone-900'
+              }`}
+              title="Tampilkan Semua Kunjungan Berurutan"
+            >
+              <List className="w-3.5 h-3.5" strokeWidth={1.75} />
+              <span>Garis Waktu Kunjungan</span>
+              <span className={`px-1.5 py-0.2 rounded text-[10px] font-mono tabular-nums ${
+                viewMode === 'list' ? 'bg-emerald-900 text-emerald-100' : 'bg-stone-200 text-stone-700'
+              }`}>
+                {filteredNotes.length}
+              </span>
+            </button>
+          </div>
+
+          {/* Expand / Collapse All (For Grouped View) */}
+          {viewMode === 'grouped' && patientGroups.length > 0 && (
+            <div className="flex items-center gap-1 text-[11px]">
+              <button
+                onClick={handleExpandAll}
+                className="px-2.5 py-1.5 text-emerald-800 bg-white hover:bg-stone-50 rounded-lg font-medium transition-colors border border-stone-200 cursor-pointer"
+              >
+                Buka Semua
+              </button>
+              <button
+                onClick={handleCollapseAll}
+                className="px-2.5 py-1.5 text-stone-600 bg-white hover:bg-stone-50 rounded-lg font-medium transition-colors border border-stone-200 cursor-pointer"
+              >
+                Tutup Semua
+              </button>
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* Content Section: Grouped vs Flat List */}
+      {filteredNotes.length === 0 ? (
+        <div className="bg-white rounded-xl border border-stone-200 p-10 text-center space-y-3">
+          <div className="w-12 h-12 rounded-lg bg-stone-100 border border-stone-200 text-emerald-800 mx-auto flex items-center justify-center">
+            <FileText className="w-6 h-6" strokeWidth={1.75} />
+          </div>
+          <h3 className="font-semibold text-stone-900 text-base">Belum Ada Catatan Perkembangan</h3>
+          <p className="text-xs text-stone-500 max-w-md mx-auto">
+            {searchQuery || selectedPatientFilter !== 'Semua'
+              ? 'Tidak ditemukan catatan perkembangan yang sesuai dengan kata kunci pencarian atau filter pasien.'
+              : 'Mulai dokumentasikan hasil kunjungan kontrol dan intervensi holistik pasien untuk memantau kemajuan klinis.'}
+          </p>
+          <button
+            onClick={() => handleOpenAddModal()}
+            className="inline-flex items-center gap-1.5 text-xs font-medium text-white bg-emerald-800 hover:bg-emerald-900 px-4 py-2 rounded-lg transition-colors cursor-pointer"
+          >
+            <Plus className="w-4 h-4" strokeWidth={1.75} />
+            <span>Tambah Catatan Pertama</span>
+          </button>
+        </div>
+      ) : viewMode === 'grouped' ? (
+        /* ========================================================================= */
+        /* MODE 1: KELOMPOK PER PASIEN (PATIENT-CENTRIC GROUPED CARDS)               */
+        /* ========================================================================= */
+        <div className="space-y-4">
+          {patientGroups.map((group) => {
+            const isExpanded = expandedPatientKeys.includes(group.key);
+
+            return (
+              <div
+                key={group.key}
+                className="bg-white rounded-xl border border-stone-200 transition-colors overflow-hidden"
+              >
+                {/* Patient Summary Card Header */}
+                <div className="p-4 sm:p-5 bg-stone-50/70 border-b border-stone-200 flex flex-col md:flex-row md:items-center justify-between gap-4">
+                  <div className="flex items-start gap-3.5">
+                    <div className="w-10 h-10 rounded-lg bg-emerald-800 text-white flex items-center justify-center font-semibold text-base shrink-0">
+                      {group.patientName.charAt(0).toUpperCase()}
+                    </div>
+
+                    <div className="space-y-1">
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <h3 className="font-semibold tracking-tight text-stone-900 text-sm sm:text-base">
+                          {getPatientDisplayName(group.patientName, group.patient)}
+                        </h3>
+                        <span className="font-mono text-xs font-medium px-2 py-0.5 bg-white text-stone-800 rounded-md border border-stone-200 tabular-nums">
+                          {group.patientNumber}
+                        </span>
+                        <span className="text-[11px] font-medium px-2 py-0.5 bg-emerald-50 text-emerald-800 border border-emerald-200 rounded-md flex items-center gap-1 tabular-nums">
+                          <History className="w-3 h-3 text-emerald-700" strokeWidth={1.75} />
+                          {group.totalVisits} Catatan Kontrol
+                        </span>
+                      </div>
+
+                      <div className="flex items-center gap-3 text-xs text-stone-500 flex-wrap">
+                        {group.patient?.gender && (
+                          <span className={`rounded-md border px-2 py-0.5 text-[10px] font-medium ${getGenderBadgeClass(group.patient.gender)}`}>
+                            {group.patient.gender}
+                          </span>
+                        )}
+                        {group.patient?.dateOfBirth && getAgeParts(group.patient.dateOfBirth) && (
+                          <span className="font-medium text-stone-600">
+                            {formatAge(getAgeParts(group.patient.dateOfBirth))}
+                          </span>
+                        )}
+                        {group.patientPhone && (
+                          <span className="flex items-center gap-1 font-medium text-stone-600 tabular-nums">
+                            <Phone className="w-3 h-3 text-stone-400" strokeWidth={1.75} />
+                            {group.patientPhone}
+                          </span>
+                        )}
+                        {group.patientEmail && (
+                          <span className="flex items-center gap-1 text-stone-500">
+                            <Mail className="w-3 h-3 text-stone-400" strokeWidth={1.75} />
+                            {group.patientEmail}
+                          </span>
+                        )}
+                        <span className="text-stone-300">•</span>
+                        <span className="flex items-center gap-1 font-medium text-stone-700">
+                          <Calendar className="w-3 h-3 text-stone-400" strokeWidth={1.75} />
+                          Kunjungan Terakhir: {formatIndonesianDate(group.latestVisitDate)}
+                        </span>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Actions & Pain Scale Trend Preview */}
+                  <div className="flex items-center gap-2 self-start md:self-center flex-wrap">
+                    {/* Pain Trend Pill */}
+                    {group.latestPainScale !== undefined && (
+                      <div className="px-3 py-1.5 bg-white rounded-lg border border-stone-200 text-xs flex items-center gap-2">
+                        <div className="text-right">
+                          <span className="text-[10px] text-stone-500 uppercase font-medium block">Skala Nyeri Terkini</span>
+                          <span className="font-semibold text-stone-900 tabular-nums">{group.latestPainScale}/10</span>
+                        </div>
+                        {group.painTrend !== undefined && group.painTrend > 0 && (
+                          <span className="inline-flex items-center gap-0.5 text-[10px] font-medium text-emerald-800 bg-emerald-50 border border-emerald-200 px-1.5 py-0.5 rounded-md tabular-nums">
+                            <TrendingDown className="w-3 h-3 text-emerald-700" strokeWidth={1.75} />
+                            Turun {group.painTrend} poin
+                          </span>
+                        )}
+                      </div>
+                    )}
+
+                    {/* Quick Add Note for This Patient */}
+                    <button
+                      onClick={() => handleOpenAddModalForPatientGroup(group)}
+                      className="px-3.5 py-2 bg-emerald-800 hover:bg-emerald-900 text-white font-medium text-xs rounded-lg transition-colors flex items-center gap-1.5 cursor-pointer"
+                      title={`Tambah Catatan Perkembangan Baru untuk ${group.patientName}`}
+                    >
+                      <Plus className="w-3.5 h-3.5" strokeWidth={1.75} />
+                      <span>Catatan Baru</span>
+                    </button>
+
+                    {/* Expand / Collapse Accordion Toggle */}
+                    <button
+                      onClick={() => handleToggleExpandPatient(group.key)}
+                      className={`px-3.5 py-2 rounded-lg text-xs font-medium transition-colors flex items-center gap-1.5 cursor-pointer ${
+                        isExpanded
+                          ? 'bg-stone-200 text-stone-900 border border-stone-300'
+                          : 'bg-white hover:bg-stone-100 text-stone-700 border border-stone-200'
+                      }`}
+                    >
+                      <span>{isExpanded ? 'Tutup Riwayat' : 'Lihat Riwayat'}</span>
+                      {isExpanded ? (
+                        <ChevronUp className="w-3.5 h-3.5" strokeWidth={1.75} />
+                      ) : (
+                        <ChevronDown className="w-3.5 h-3.5" strokeWidth={1.75} />
+                      )}
+                    </button>
+                  </div>
+                </div>
+
+                {/* Collapsible Chronological Visits Section */}
+                {isExpanded && (
+                  <div className="p-4 sm:p-5 bg-white space-y-4">
+                    <div className="flex items-center justify-between border-b border-stone-200 pb-2.5">
+                      <div className="flex items-center gap-2">
+                        <Stethoscope className="w-4 h-4 text-emerald-800" strokeWidth={1.75} />
+                        <h4 className="font-semibold text-stone-900 text-xs sm:text-sm">
+                          Riwayat Kunjungan & Catatan Perkembangan (<span className="tabular-nums">{group.notes.length}</span> Sesi)
+                        </h4>
+                      </div>
+                      <span className="text-[11px] text-stone-500">
+                        Diurutkan dari kunjungan terbaru
+                      </span>
+                    </div>
+
+                    <div className="space-y-4">
+                      {group.notes.map((note, idx) => (
+                        <div
+                          key={note.id}
+                          className="bg-stone-50/60 rounded-xl border border-stone-200 p-4 sm:p-5 space-y-3.5"
+                        >
+                          {/* Visit Sub-Header */}
+                          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 border-b border-stone-200 pb-2.5">
+                            <div className="flex items-center gap-2 flex-wrap">
+                              <span className="font-semibold text-xs px-2.5 py-0.5 bg-emerald-800 text-white rounded-md tabular-nums">
+                                Kunjungan #{group.notes.length - idx}
+                              </span>
+                              <span className="font-semibold text-stone-900 text-xs sm:text-sm">
+                                {note.therapyName}
+                              </span>
+                              <span className="text-xs text-stone-500 flex items-center gap-1">
+                                <Calendar className="w-3.5 h-3.5 text-stone-400" strokeWidth={1.75} />
+                                {formatIndonesianDate(note.visitDate)}
+                              </span>
+                              {note.bookingCode && (
+                                <span className="font-mono text-[10px] font-medium bg-white border border-stone-200 text-stone-700 px-2 py-0.5 rounded-md tabular-nums">
+                                  {note.bookingCode}
+                                </span>
+                              )}
+                            </div>
+
+                            <div className="flex items-center gap-1.5 self-end sm:self-center">
+                              <button
+                                onClick={() => setDetailNote(note)}
+                                className="px-2.5 py-1.5 rounded-lg bg-white hover:bg-stone-50 text-stone-700 hover:text-stone-900 border border-stone-200 text-xs font-medium flex items-center gap-1 transition-colors cursor-pointer"
+                                title="Lihat Lembar Rekam Medis Lengkap"
+                              >
+                                <Eye className="w-3.5 h-3.5" strokeWidth={1.75} />
+                                <span>Detail</span>
+                              </button>
+                              <button
+                                onClick={() => handleOpenEditModal(note)}
+                                className="px-2.5 py-1.5 rounded-lg bg-white hover:bg-stone-50 text-stone-700 hover:text-stone-900 border border-stone-200 text-xs font-medium flex items-center gap-1 transition-colors cursor-pointer"
+                                title="Edit Catatan Ini"
+                              >
+                                <Edit3 className="w-3.5 h-3.5" strokeWidth={1.75} />
+                                <span>Edit</span>
+                              </button>
+                              <button
+                                onClick={() => setNoteToDelete(note)}
+                                className="p-1.5 rounded-lg bg-white hover:bg-rose-50 text-stone-400 hover:text-rose-700 border border-stone-200 hover:border-rose-200 text-xs transition-colors cursor-pointer"
+                                title="Hapus Catatan Ini"
+                              >
+                                <Trash2 className="w-3.5 h-3.5" strokeWidth={1.75} />
+                              </button>
+                            </div>
+                          </div>
+
+                          {/* Catatan perkembangan pasien */}
+                          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                            {/* 1. Keluhan Utama */}
+                            <div className="bg-white border border-stone-200 rounded-lg p-3.5 space-y-1.5">
+                              <div className="flex items-center gap-1.5 text-stone-600 font-semibold text-[11px] uppercase tracking-wider">
+                                <AlertCircle className="w-3.5 h-3.5 text-emerald-800 shrink-0" strokeWidth={1.75} />
+                                <span>1. Keluhan Utama (Subjective)</span>
+                              </div>
+                              <p className="text-xs text-stone-900 leading-relaxed">
+                                {note.chiefComplaint}
+                              </p>
+                            </div>
+
+                            {/* 2. Hasil Pengkajian */}
+                            <div className="bg-white border border-stone-200 rounded-lg p-3.5 space-y-1.5">
+                              <div className="flex items-center justify-between gap-2">
+                                <div className="flex items-center gap-1.5 text-stone-600 font-semibold text-[11px] uppercase tracking-wider">
+                                  <Activity className="w-3.5 h-3.5 text-emerald-800 shrink-0" strokeWidth={1.75} />
+                                  <span>2. Pengkajian Klinis & TTV (Objective)</span>
+                                </div>
+                                {note.vitalSigns?.painScale !== undefined && (
+                                  <span className="text-[10px] font-semibold px-2 py-0.5 rounded-md bg-stone-100 border border-stone-200 text-stone-800 tabular-nums">
+                                    Nyeri: {note.vitalSigns.painScale}/10
+                                  </span>
+                                )}
+                              </div>
+                              <p className="text-xs text-stone-900 leading-relaxed">
+                                {note.assessment}
+                              </p>
+                              {note.vitalSigns && (
+                                <div className="flex items-center gap-3 pt-1.5 border-t border-stone-100 text-[11px] text-stone-700 font-medium flex-wrap tabular-nums">
+                                  {note.vitalSigns.bloodPressure && <span>TD: <strong className="font-semibold text-stone-900">{note.vitalSigns.bloodPressure}</strong></span>}
+                                  {note.vitalSigns.pulseRate && <span>Nadi: <strong className="font-semibold text-stone-900">{note.vitalSigns.pulseRate}</strong></span>}
+                                  {note.vitalSigns.respiratoryRate && <span>RR: <strong className="font-semibold text-stone-900">{note.vitalSigns.respiratoryRate}</strong></span>}
+                                </div>
+                              )}
+                            </div>
+
+                            {/* 3. Intervensi */}
+                            <div className="bg-white border border-stone-200 rounded-lg p-3.5 space-y-1.5">
+                              <div className="flex items-center gap-1.5 text-stone-600 font-semibold text-[11px] uppercase tracking-wider">
+                                <Sparkles className="w-3.5 h-3.5 text-emerald-800 shrink-0" strokeWidth={1.75} />
+                                <span>3. Intervensi yang Diberikan</span>
+                              </div>
+                              <p className="text-xs text-stone-900 leading-relaxed whitespace-pre-line">
+                                {note.intervention}
+                              </p>
+                            </div>
+
+                            {/* 4. Tindak Lanjut */}
+                            <div className="bg-white border border-stone-200 rounded-lg p-3.5 space-y-1.5">
+                              <div className="flex items-center gap-1.5 text-stone-600 font-semibold text-[11px] uppercase tracking-wider">
+                                <HeartPulse className="w-3.5 h-3.5 text-emerald-800 shrink-0" strokeWidth={1.75} />
+                                <span>4. Perkembangan & Tindak Lanjut Medis</span>
+                              </div>
+                              <p className="text-xs text-stone-900 leading-relaxed">
+                                {note.progressFollowUp}
+                              </p>
+                            </div>
+                          </div>
+
+                          {/* Footer Info */}
+                          <div className="flex items-center justify-between text-[11px] text-stone-500 pt-2 border-t border-stone-200">
+                            <span className="flex items-center gap-1.5">
+                              <User className="w-3.5 h-3.5 text-stone-400" strokeWidth={1.75} />
+                              <span>Nakes Penanggung Jawab: <strong className="font-semibold text-stone-900">{note.nurseName}</strong></span>
+                            </span>
+                            <span className="text-[11px] text-emerald-800 font-medium flex items-center gap-1">
+                              <CheckCircle2 className="w-3.5 h-3.5" strokeWidth={1.75} />
+                              Tersinkronisasi ke Profil Pasien
+                            </span>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      ) : (
+        /* ========================================================================= */
+        /* MODE 2: GARIS WAKTU SEMUA KUNJUNGAN (FLAT CHRONOLOGICAL TIMELINE)         */
+        /* ========================================================================= */
+        <div className="grid grid-cols-1 gap-4">
+          {filteredNotes.map((note) => (
+            <div
+              key={note.id}
+              className="bg-white rounded-xl border border-stone-200 p-5 space-y-4 relative"
+            >
+              {/* Note Header */}
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-b border-stone-200 pb-3.5">
+                <div className="flex items-start sm:items-center gap-3">
+                  <div className="w-10 h-10 rounded-lg bg-stone-50 border border-stone-200 text-emerald-800 flex items-center justify-center shrink-0">
+                    <Stethoscope className="w-5 h-5" strokeWidth={1.75} />
+                  </div>
+                  <div>
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <h4 className="font-semibold text-stone-900 text-sm sm:text-base">
+                        {getPatientDisplayName(note.patientName, getProfileForNote(note))}
+                      </h4>
+                      {getProfileForNote(note)?.gender && (
+                        <span className={`rounded-md border px-2 py-0.5 text-[10px] font-medium ${getGenderBadgeClass(getProfileForNote(note)?.gender)}`}>
+                          {getProfileForNote(note)?.gender}
+                        </span>
+                      )}
+                      {getProfileForNote(note)?.dateOfBirth && (
+                        <span className="text-[11px] font-medium text-stone-500">
+                          {formatAge(getAgeParts(getProfileForNote(note)!.dateOfBirth!))}
+                        </span>
+                      )}
+                      <span className="font-mono text-[11px] font-medium px-2 py-0.5 bg-stone-100 text-stone-700 rounded-md border border-stone-200 tabular-nums">
+                        {note.patientNumber}
+                      </span>
+                      {note.bookingCode && (
+                        <span className="font-mono text-[11px] font-medium px-2 py-0.5 bg-emerald-50 text-emerald-800 rounded-md border border-emerald-200 tabular-nums">
+                          {note.bookingCode}
+                        </span>
+                      )}
+                    </div>
+                    <p className="text-xs text-stone-500 flex items-center gap-2 mt-0.5">
+                      <span className="font-medium text-emerald-800">{note.therapyName}</span>
+                      <span>•</span>
+                      <span className="flex items-center gap-1">
+                        <Calendar className="w-3.5 h-3.5 text-stone-400" strokeWidth={1.75} />
+                        {formatIndonesianDate(note.visitDate)}
+                      </span>
+                    </p>
+                  </div>
+                </div>
+
+                <div className="flex items-center gap-1.5 self-end sm:self-center">
+                  <button
+                    onClick={() => setDetailNote(note)}
+                    className="px-2.5 py-1.5 rounded-lg text-stone-700 hover:text-stone-900 hover:bg-stone-50 border border-stone-200 text-xs font-medium flex items-center gap-1 transition-colors cursor-pointer"
+                    title="Lihat Detail Catatan Perkembangan"
+                  >
+                    <Eye className="w-3.5 h-3.5" strokeWidth={1.75} />
+                    <span className="hidden md:inline">Detail Lengkap</span>
+                  </button>
+                  <button
+                    onClick={() => handleOpenEditModal(note)}
+                    className="px-2.5 py-1.5 rounded-lg text-stone-700 hover:text-stone-900 hover:bg-stone-50 border border-stone-200 text-xs font-medium flex items-center gap-1 transition-colors cursor-pointer"
+                    title="Edit Catatan Perkembangan"
+                  >
+                    <Edit3 className="w-3.5 h-3.5" strokeWidth={1.75} />
+                    <span className="hidden md:inline">Edit</span>
+                  </button>
+                  <button
+                    onClick={() => setNoteToDelete(note)}
+                    className="p-1.5 rounded-lg text-stone-400 hover:text-rose-700 hover:bg-rose-50 border border-stone-200 hover:border-rose-200 text-xs flex items-center gap-1 transition-colors cursor-pointer"
+                    title="Hapus Catatan"
+                  >
+                    <Trash2 className="w-3.5 h-3.5" strokeWidth={1.75} />
+                  </button>
+                </div>
+              </div>
+
+              {/* 4 Clinical Dimensions Grid */}
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-3.5">
+                {/* 1. Keluhan Utama */}
+                <div className="bg-stone-50/70 border border-stone-200 rounded-lg p-3.5 space-y-1.5">
+                  <div className="flex items-center gap-1.5 text-stone-600 font-semibold text-[11px] uppercase tracking-wider">
+                    <AlertCircle className="w-3.5 h-3.5 text-emerald-800 shrink-0" strokeWidth={1.75} />
+                    <span>1. Keluhan Utama (Subjective)</span>
+                  </div>
+                  <p className="text-xs text-stone-900 leading-relaxed">
+                    {note.chiefComplaint}
+                  </p>
+                </div>
+
+                {/* 2. Hasil Pengkajian */}
+                <div className="bg-stone-50/70 border border-stone-200 rounded-lg p-3.5 space-y-1.5">
+                  <div className="flex items-center justify-between gap-2">
+                    <div className="flex items-center gap-1.5 text-stone-600 font-semibold text-[11px] uppercase tracking-wider">
+                      <Activity className="w-3.5 h-3.5 text-emerald-800 shrink-0" strokeWidth={1.75} />
+                      <span>2. Hasil Pengkajian (Objective)</span>
+                    </div>
+                    {note.vitalSigns?.painScale !== undefined && (
+                      <span className="text-[10px] font-semibold px-2 py-0.5 rounded-md bg-white border border-stone-200 text-stone-800 tabular-nums">
+                        Skala Nyeri: {note.vitalSigns.painScale}/10
+                      </span>
+                    )}
+                  </div>
+                  <p className="text-xs text-stone-900 leading-relaxed">
+                    {note.assessment}
+                  </p>
+                  {note.vitalSigns && (
+                    <div className="flex items-center gap-3 pt-1.5 border-t border-stone-200 text-[11px] text-stone-700 font-medium flex-wrap tabular-nums">
+                      {note.vitalSigns.bloodPressure && <span>TD: <strong className="font-semibold text-stone-900">{note.vitalSigns.bloodPressure}</strong></span>}
+                      {note.vitalSigns.pulseRate && <span>Nadi: <strong className="font-semibold text-stone-900">{note.vitalSigns.pulseRate}</strong></span>}
+                      {note.vitalSigns.respiratoryRate && <span>RR: <strong className="font-semibold text-stone-900">{note.vitalSigns.respiratoryRate}</strong></span>}
+                    </div>
+                  )}
+                </div>
+
+                {/* 3. Intervensi yang Diberikan */}
+                <div className="bg-stone-50/70 border border-stone-200 rounded-lg p-3.5 space-y-1.5">
+                  <div className="flex items-center gap-1.5 text-stone-600 font-semibold text-[11px] uppercase tracking-wider">
+                    <Sparkles className="w-3.5 h-3.5 text-emerald-800 shrink-0" strokeWidth={1.75} />
+                    <span>3. Intervensi yang Diberikan</span>
+                  </div>
+                  <p className="text-xs text-stone-900 leading-relaxed whitespace-pre-line">
+                    {note.intervention}
+                  </p>
+                </div>
+
+                {/* 4. Catatan Perkembangan & Tindak Lanjut */}
+                <div className="bg-stone-50/70 border border-stone-200 rounded-lg p-3.5 space-y-1.5">
+                  <div className="flex items-center gap-1.5 text-stone-600 font-semibold text-[11px] uppercase tracking-wider">
+                    <HeartPulse className="w-3.5 h-3.5 text-emerald-800 shrink-0" strokeWidth={1.75} />
+                    <span>4. Perkembangan / Tindak Lanjut Medis</span>
+                  </div>
+                  <p className="text-xs text-stone-900 leading-relaxed">
+                    {note.progressFollowUp}
+                  </p>
+                </div>
+              </div>
+
+              {/* Note Footer */}
+              <div className="flex items-center justify-between text-[11px] text-stone-500 pt-2.5 border-t border-stone-200">
+                <div className="flex items-center gap-1.5">
+                  <User className="w-3.5 h-3.5 text-stone-400" strokeWidth={1.75} />
+                  <span>Tenaga Perawat Penanggung Jawab: <strong className="font-semibold text-stone-900">{note.nurseName}</strong></span>
+                </div>
+                <span className="text-stone-400 tabular-nums">
+                  Tercatat: {new Date(note.createdAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })} WIB
+                </span>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* MODAL: Tambah / Edit Catatan Perkembangan */}
+      {showAddModal && (
+        <div className="fixed inset-0 bg-stone-900/60 backdrop-blur-sm z-50 flex items-center justify-center p-3.5 sm:p-4 overflow-y-auto">
+          <div className="bg-white rounded-xl max-w-2xl w-full p-5 sm:p-6 space-y-5 my-8 border border-stone-200">
+            <div className="flex items-center justify-between border-b border-stone-200 pb-4">
+              <div className="flex items-center gap-3">
+                <div className="w-10 h-10 rounded-lg bg-emerald-800 text-white flex items-center justify-center shrink-0">
+                  <ClipboardList className="w-5 h-5" strokeWidth={1.75} />
+                </div>
+                <div>
+                  <h3 className="font-semibold tracking-tight text-stone-900 text-base sm:text-lg">
+                    {editingNote ? 'Edit Catatan Perkembangan Pasien' : 'Catatan Perkembangan Kontrol Kunjungan'}
+                  </h3>
+                  <p className="text-xs text-stone-500">
+                    Catatan ini tersimpan sebagai riwayat perkembangan yang dapat dibaca pasien di akunnya.
+                  </p>
+                </div>
+              </div>
+              <button
+                onClick={() => {
+                  setShowAddModal(false);
+                  setEditingNote(null);
+                }}
+                className="w-8 h-8 rounded-lg border border-stone-200 bg-white text-stone-500 hover:text-stone-800 hover:bg-stone-100 flex items-center justify-center transition-colors cursor-pointer shrink-0"
+              >
+                <X className="w-4 h-4" strokeWidth={1.75} />
+              </button>
+            </div>
+
+            <form onSubmit={handleSaveForm} className="space-y-4">
+              {/* Quick Select from Appointments or Registered Patients */}
+              {!editingNote && (appointments.length > 0 || registeredPatientsList.length > 0) && (
+                <div className="p-3.5 bg-stone-50 rounded-xl border border-stone-200 space-y-1.5">
+                  <div className="flex items-center justify-between flex-wrap gap-2">
+                    <label className="text-xs font-semibold text-stone-800 flex items-center gap-1.5">
+                      <Users className="w-4 h-4 text-emerald-800" strokeWidth={1.75} />
+                      <span>Pilih Cepat dari Jadwal / Akun Pasien Terdaftar:</span>
+                    </label>
+                    <span className="text-[10px] font-medium text-emerald-800 bg-emerald-50 border border-emerald-200 px-2 py-0.5 rounded-md flex items-center gap-1">
+                      <CheckCircle2 className="w-3 h-3 text-emerald-700" strokeWidth={1.75} />
+                      Sinkronisasi Otomatis ke Profil
+                    </span>
+                  </div>
+                  <select
+                    onChange={(e) => handleQuickSelectPatientOrApp(e.target.value)}
+                    defaultValue=""
+                    className="w-full bg-white border border-stone-300 rounded-lg px-3 py-2 text-xs text-stone-900 focus:outline-none focus:border-emerald-800 font-medium"
+                  >
+                    <option value="">-- Isi Manual atau Pilih Pasien untuk Tarik Data Otomatis --</option>
+                    {appointments.length > 0 && (
+                      <optgroup label="Dari Jadwal Reservasi Klinik">
+                        {appointments.map((a) => (
+                          <option key={`app-${a.id}`} value={`app:${a.id}`}>
+                            {a.userName} ({a.bookingCode}) - {a.therapyName} ({a.dayName}, {a.date})
+                          </option>
+                        ))}
+                      </optgroup>
+                    )}
+                    {registeredPatientsList.length > 0 && (
+                      <optgroup label="Dari Direktori Akun Pasien">
+                        {registeredPatientsList.map((p) => (
+                          <option key={`patient-${p.id || p.email}`} value={`patient:${p.id || p.email}`}>
+                            {getPatientDisplayName(p.name, p)} (RM: {p.patientNumber || 'HNC'}) - {p.phone || p.email}
+                          </option>
+                        ))}
+                      </optgroup>
+                    )}
+                  </select>
+                </div>
+              )}
+
+              {/* Patient Basic Info Row */}
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                <div className="sm:col-span-1">
+                  <label className="text-xs font-semibold text-stone-800 block mb-1">
+                    Tanggal Kunjungan <span className="text-rose-700">*</span>
+                  </label>
+                  <input
+                    type="date"
+                    required
+                    value={formVisitDate}
+                    onChange={(e) => setFormVisitDate(e.target.value)}
+                    className="w-full bg-white border border-stone-300 rounded-lg px-3 py-2 text-xs text-stone-900 focus:outline-none focus:border-emerald-800 font-medium tabular-nums"
+                  />
+                </div>
+
+                <div className="sm:col-span-2">
+                  <label className="text-xs font-semibold text-stone-800 block mb-1">
+                    Nama Lengkap Pasien <span className="text-rose-700">*</span>
+                  </label>
+                  <input
+                    type="text"
+                    required
+                    placeholder="Contoh: Bpk. Hendra Pratama, S.T."
+                    value={formPatientName}
+                    onChange={(e) => setFormPatientName(e.target.value)}
+                    className="w-full bg-white border border-stone-300 rounded-lg px-3 py-2 text-xs text-stone-900 focus:outline-none focus:border-emerald-800"
+                  />
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                <div>
+                  <label className="text-xs font-semibold text-stone-800 block mb-1">
+                    No. Rekam Medis (RM)
+                  </label>
+                  <input
+                    type="text"
+                    placeholder="RM-HNC-2026..."
+                    value={formPatientNumber}
+                    onChange={(e) => setFormPatientNumber(e.target.value)}
+                    className="w-full bg-white border border-stone-300 rounded-lg px-3 py-2 text-xs text-stone-900 focus:outline-none focus:border-emerald-800 font-mono tabular-nums"
+                  />
+                </div>
+
+                <div>
+                  <label className="text-xs font-semibold text-stone-800 block mb-1">
+                    No. Telepon / WhatsApp
+                  </label>
+                  <input
+                    type="tel"
+                    placeholder="0812-xxxx-xxxx"
+                    value={formPatientPhone}
+                    onChange={(e) => setFormPatientPhone(e.target.value)}
+                    className="w-full bg-white border border-stone-300 rounded-lg px-3 py-2 text-xs text-stone-900 focus:outline-none focus:border-emerald-800 tabular-nums"
+                  />
+                </div>
+
+                <div>
+                  <label className="text-xs font-semibold text-stone-800 block mb-1">
+                    Jenis Terapi yang Dilakukan
+                  </label>
+                  <input
+                    type="text"
+                    placeholder="Contoh: Akupresur / Pijat Relaksasi"
+                    value={formTherapyName}
+                    onChange={(e) => setFormTherapyName(e.target.value)}
+                    className="w-full bg-white border border-stone-300 rounded-lg px-3 py-2 text-xs text-stone-900 focus:outline-none focus:border-emerald-800"
+                  />
+                </div>
+              </div>
+
+              {/* Tanda Vital & Skala Nyeri Grid */}
+              <div className="p-3.5 bg-stone-50 rounded-xl border border-stone-200 space-y-2.5">
+                <span className="text-[11px] font-semibold text-stone-800 uppercase tracking-wider flex items-center gap-1.5">
+                  <Activity className="w-3.5 h-3.5 text-emerald-800" strokeWidth={1.75} />
+                  Tanda-Tanda Vital & Skala Nyeri Pasien
+                </span>
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5 text-xs">
+                  <div>
+                    <label className="text-[11px] font-medium text-stone-600 block mb-1">Tekanan Darah</label>
+                    <input
+                      type="text"
+                      placeholder="120/80 mmHg"
+                      value={formBP}
+                      onChange={(e) => setFormBP(e.target.value)}
+                      className="w-full bg-white border border-stone-300 rounded-lg px-2.5 py-1.5 text-xs text-stone-900 focus:outline-none focus:border-emerald-800 font-medium tabular-nums"
+                    />
+                  </div>
+                  <div>
+                    <label className="text-[11px] font-medium text-stone-600 block mb-1">Frekuensi Nadi</label>
+                    <input
+                      type="text"
+                      placeholder="78 x/menit"
+                      value={formPulse}
+                      onChange={(e) => setFormPulse(e.target.value)}
+                      className="w-full bg-white border border-stone-300 rounded-lg px-2.5 py-1.5 text-xs text-stone-900 focus:outline-none focus:border-emerald-800 font-medium tabular-nums"
+                    />
+                  </div>
+                  <div>
+                    <label className="text-[11px] font-medium text-stone-600 block mb-1">Laju Pernapasan</label>
+                    <input
+                      type="text"
+                      placeholder="18 x/menit"
+                      value={formRR}
+                      onChange={(e) => setFormRR(e.target.value)}
+                      className="w-full bg-white border border-stone-300 rounded-lg px-2.5 py-1.5 text-xs text-stone-900 focus:outline-none focus:border-emerald-800 font-medium tabular-nums"
+                    />
+                  </div>
+                  <div>
+                    <label className="text-[11px] font-medium text-stone-600 block mb-1">Skala Nyeri (0 - 10)</label>
+                    <select
+                      value={formPainScale}
+                      onChange={(e) => setFormPainScale(Number(e.target.value))}
+                      className="w-full bg-white border border-stone-300 rounded-lg px-2.5 py-1.5 text-xs text-stone-900 focus:outline-none focus:border-emerald-800 font-semibold tabular-nums"
+                    >
+                      {[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10].map((num) => (
+                        <option key={num} value={num}>
+                          {num} {num === 0 ? '(Bebas Nyeri)' : num <= 3 ? '(Nyeri Ringan)' : num <= 6 ? '(Nyeri Sedang)' : '(Nyeri Berat)'}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                </div>
+              </div>
+
+              {/* 1. Keluhan Utama */}
+              <div>
+                <label className="text-xs font-semibold text-stone-800 block mb-1">
+                  1. Keluhan Utama Pasien <span className="text-rose-700">*</span>
+                </label>
+                <textarea
+                  required
+                  rows={2}
+                  placeholder="Deskripsikan keluhan subjektif yang dirasakan pasien (misal: rasa kaku tengkuk, nyeri pinggang bawah, kelelahan, sulit tidur)..."
+                  value={formChiefComplaint}
+                  onChange={(e) => setFormChiefComplaint(e.target.value)}
+                  className="w-full bg-white border border-stone-300 rounded-lg p-2.5 text-xs text-stone-900 focus:outline-none focus:border-emerald-800 resize-y"
+                />
+              </div>
+
+              {/* 2. Hasil Pengkajian */}
+              <div>
+                <label className="text-xs font-semibold text-stone-800 block mb-1">
+                  2. Hasil Pengkajian Klinis / Asesmen <span className="text-rose-700">*</span>
+                </label>
+                <textarea
+                  required
+                  rows={2}
+                  placeholder="Hasil pemeriksaan fisik objektif, palpasi spasme otot, respon verbal, keadaan umum pasien..."
+                  value={formAssessment}
+                  onChange={(e) => setFormAssessment(e.target.value)}
+                  className="w-full bg-white border border-stone-300 rounded-lg p-2.5 text-xs text-stone-900 focus:outline-none focus:border-emerald-800 resize-y"
+                />
+              </div>
+
+              {/* 3. Intervensi */}
+              <div>
+                <label className="text-xs font-semibold text-stone-800 block mb-1">
+                  3. Intervensi yang Diberikan <span className="text-rose-700">*</span>
+                </label>
+                <textarea
+                  required
+                  rows={3}
+                  placeholder="Tindakan keperawatan komplementer yang dilakukan (misal: titik akupresur yang ditekan, bekam kering dengan 4 cup, durasi pemijatan, edukasi relaksasi)..."
+                  value={formIntervention}
+                  onChange={(e) => setFormIntervention(e.target.value)}
+                  className="w-full bg-white border border-stone-300 rounded-lg p-2.5 text-xs text-stone-900 focus:outline-none focus:border-emerald-800 resize-y"
+                />
+              </div>
+
+              {/* 4. Catatan Perkembangan & Tindak Lanjut */}
+              <div>
+                <label className="text-xs font-semibold text-stone-800 block mb-1">
+                  4. Catatan Perkembangan & Tindak Lanjut Medis <span className="text-rose-700">*</span>
+                </label>
+                <textarea
+                  required
+                  rows={2}
+                  placeholder="Evaluasi respon pasca-terapi, penurunan skala nyeri, anjuran perawatan mandiri di rumah, dan rekomendasi jadwal kontrol lanjutan..."
+                  value={formProgressFollowUp}
+                  onChange={(e) => setFormProgressFollowUp(e.target.value)}
+                  className="w-full bg-white border border-stone-300 rounded-lg p-2.5 text-xs text-stone-900 focus:outline-none focus:border-emerald-800 resize-y"
+                />
+              </div>
+
+              {/* Nurse In Charge */}
+              <div>
+                <label className="text-xs font-semibold text-stone-800 block mb-1">
+                  Nama Tenaga Perawat / Medis Penanggung Jawab <span className="text-rose-700">*</span>
+                </label>
+                <input
+                  type="text"
+                  required
+                  placeholder="Contoh: Ns. Rahmat Hidayat, S.Kep."
+                  value={formNurseName}
+                  onChange={(e) => setFormNurseName(e.target.value)}
+                  className="w-full bg-white border border-stone-300 rounded-lg px-3 py-2 text-xs text-stone-900 focus:outline-none focus:border-emerald-800 font-medium"
+                />
+              </div>
+
+              {/* Action Buttons */}
+              <div className="flex items-center justify-end gap-2.5 pt-3 border-t border-stone-200">
+                <button
+                  type="button"
+                  disabled={isSavingNote}
+                  onClick={() => {
+                    setShowAddModal(false);
+                    setEditingNote(null);
+                  }}
+                  className="px-4 py-2 rounded-lg bg-white border border-stone-300 hover:bg-stone-50 text-stone-700 font-medium text-xs transition-colors cursor-pointer disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  Batal
+                </button>
+                <button
+                  type="submit"
+                  disabled={isSavingNote}
+                  className="px-5 py-2 rounded-lg bg-emerald-800 hover:bg-emerald-900 text-white font-medium text-xs transition-colors flex items-center gap-1.5 cursor-pointer disabled:cursor-wait disabled:opacity-60"
+                >
+                  <CheckCircle2 className="w-4 h-4" strokeWidth={1.75} />
+                  <span>{isSavingNote ? 'Menyimpan...' : editingNote ? 'Simpan Perubahan' : 'Simpan Catatan Perkembangan'}</span>
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* MODAL: Detail Catatan Perkembangan Pasien */}
+      {detailNote && (
+        <div className="fixed inset-0 bg-stone-900/60 backdrop-blur-sm z-50 flex items-center justify-center p-3.5 sm:p-4 overflow-y-auto">
+          <div className="bg-white rounded-xl max-w-2xl w-full p-5 sm:p-6 space-y-5 my-8 border border-stone-200 print:shadow-none print:border-none">
+            {/* Modal Header */}
+            <div className="flex items-center justify-between border-b border-stone-200 pb-4">
+              <div className="flex items-center gap-3">
+                <div className="w-10 h-10 rounded-lg bg-emerald-800 text-white flex items-center justify-center shrink-0">
+                  <Stethoscope className="w-5 h-5" strokeWidth={1.75} />
+                </div>
+                <div>
+                  <span className="text-[10px] font-semibold text-emerald-800 uppercase tracking-wider block">
+                    Departemen Keperawatan Komplementer UNDIP
+                  </span>
+                  <h3 className="font-semibold tracking-tight text-stone-900 text-base sm:text-lg">
+                    Lembar Catatan Perkembangan Kontrol Pasien
+                  </h3>
+                </div>
+              </div>
+              <div className="flex items-center gap-1.5">
+                <button
+                  onClick={handlePrintNote}
+                  className="px-2.5 py-1.5 rounded-lg border border-stone-200 text-stone-700 hover:text-stone-900 hover:bg-stone-50 text-xs font-medium flex items-center gap-1.5 transition-colors cursor-pointer"
+                  title="Cetak Dokumen"
+                >
+                  <Printer className="w-4 h-4" strokeWidth={1.75} />
+                  <span className="hidden sm:inline">Cetak</span>
+                </button>
+                <button
+                  onClick={() => setDetailNote(null)}
+                  className="w-8 h-8 rounded-lg border border-stone-200 bg-white text-stone-500 hover:text-stone-800 hover:bg-stone-100 flex items-center justify-center transition-colors cursor-pointer"
+                >
+                  <X className="w-4 h-4" strokeWidth={1.75} />
+                </button>
+              </div>
+            </div>
+
+            {/* Patient Header Details */}
+            <div className="bg-stone-50 rounded-xl p-4 border border-stone-200 text-xs grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <div>
+                <span className="text-[10px] text-stone-500 block font-semibold uppercase tracking-wide">Nama Pasien:</span>
+                <span className="font-semibold text-stone-900 text-sm">
+                  {getPatientDisplayName(detailNote.patientName, detailPatient)}
+                </span>
+              </div>
+              {detailPatient?.gender && (
+                <div>
+                  <span className="text-[10px] text-stone-500 block font-semibold uppercase tracking-wide">Jenis Kelamin:</span>
+                  <span className={`inline-flex mt-1 rounded-md border px-2 py-0.5 text-[10px] font-medium ${getGenderBadgeClass(detailPatient.gender)}`}>
+                    {detailPatient.gender}
+                  </span>
+                </div>
+              )}
+              {detailPatientAge && (
+                <div>
+                  <span className="text-[10px] text-stone-500 block font-semibold uppercase tracking-wide">Usia:</span>
+                  <span className="font-semibold text-stone-900">{detailPatientAge}</span>
+                </div>
+              )}
+              <div>
+                <span className="text-[10px] text-stone-500 block font-semibold uppercase tracking-wide">Nomor Rekam Medis (RM):</span>
+                <span className="font-mono font-semibold text-stone-900 tabular-nums">{detailNote.patientNumber}</span>
+              </div>
+              <div>
+                <span className="text-[10px] text-stone-500 block font-semibold uppercase tracking-wide">Tanggal Kunjungan / Kontrol:</span>
+                <span className="font-semibold text-stone-900">{formatIndonesianDate(detailNote.visitDate)}</span>
+              </div>
+              <div>
+                <span className="text-[10px] text-stone-500 block font-semibold uppercase tracking-wide">Tindakan Terapi:</span>
+                <span className="font-semibold text-emerald-800">{detailNote.therapyName}</span>
+              </div>
+              {detailNote.bookingCode && (
+                <div>
+                  <span className="text-[10px] text-stone-500 block font-semibold uppercase tracking-wide">Kode Booking:</span>
+                  <span className="font-mono font-semibold text-stone-900 tabular-nums">{detailNote.bookingCode}</span>
+                </div>
+              )}
+              {detailNote.patientPhone && (
+                <div>
+                  <span className="text-[10px] text-stone-500 block font-semibold uppercase tracking-wide">Kontak Telepon:</span>
+                  <span className="font-medium text-stone-900 tabular-nums">{detailNote.patientPhone}</span>
+                </div>
+              )}
+            </div>
+
+            {/* Tanda Vital Box */}
+            {detailNote.vitalSigns && (
+              <div className="bg-stone-50 border border-stone-200 rounded-xl p-4 text-xs space-y-2.5">
+                <span className="font-semibold text-stone-800 flex items-center gap-1.5 uppercase tracking-wider text-[11px]">
+                  <Activity className="w-4 h-4 text-emerald-800" strokeWidth={1.75} />
+                  Pengukuran Tanda-Tanda Vital & Skala Nyeri
+                </span>
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5 text-stone-900 font-semibold tabular-nums">
+                  <div className="p-2.5 bg-white rounded-lg border border-stone-200">
+                    <span className="text-[10px] text-stone-500 font-medium block">Tekanan Darah:</span>
+                    <span>{detailNote.vitalSigns.bloodPressure || '-'}</span>
+                  </div>
+                  <div className="p-2.5 bg-white rounded-lg border border-stone-200">
+                    <span className="text-[10px] text-stone-500 font-medium block">Nadi:</span>
+                    <span>{detailNote.vitalSigns.pulseRate || '-'}</span>
+                  </div>
+                  <div className="p-2.5 bg-white rounded-lg border border-stone-200">
+                    <span className="text-[10px] text-stone-500 font-medium block">Laju Napas:</span>
+                    <span>{detailNote.vitalSigns.respiratoryRate || '-'}</span>
+                  </div>
+                  <div className="p-2.5 bg-white rounded-lg border border-stone-200">
+                    <span className="text-[10px] text-stone-500 font-medium block">Skala Nyeri (NRS):</span>
+                    <span>{detailNote.vitalSigns.painScale !== undefined ? `${detailNote.vitalSigns.painScale}/10` : '-'}</span>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* Rincian catatan perkembangan pasien */}
+            <div className="space-y-3 text-xs">
+              <div className="p-4 bg-white rounded-lg border border-stone-200 space-y-1.5">
+                <h5 className="font-semibold text-stone-700 uppercase tracking-wider text-[11px] flex items-center gap-1.5">
+                  <AlertCircle className="w-3.5 h-3.5 text-emerald-800" strokeWidth={1.75} />
+                  1. Keluhan Utama (Subjective)
+                </h5>
+                <p className="text-stone-900 leading-relaxed pl-5">{detailNote.chiefComplaint}</p>
+              </div>
+
+              <div className="p-4 bg-white rounded-lg border border-stone-200 space-y-1.5">
+                <h5 className="font-semibold text-stone-700 uppercase tracking-wider text-[11px] flex items-center gap-1.5">
+                  <Activity className="w-3.5 h-3.5 text-emerald-800" strokeWidth={1.75} />
+                  2. Hasil Pengkajian & Asesmen Klinis (Objective & Assessment)
+                </h5>
+                <p className="text-stone-900 leading-relaxed pl-5">{detailNote.assessment}</p>
+              </div>
+
+              <div className="p-4 bg-white rounded-lg border border-stone-200 space-y-1.5">
+                <h5 className="font-semibold text-stone-700 uppercase tracking-wider text-[11px] flex items-center gap-1.5">
+                  <Sparkles className="w-3.5 h-3.5 text-emerald-800" strokeWidth={1.75} />
+                  3. Intervensi Keperawatan yang Diberikan (Plan & Implementation)
+                </h5>
+                <p className="text-stone-900 leading-relaxed pl-5 whitespace-pre-line">{detailNote.intervention}</p>
+              </div>
+
+              <div className="p-4 bg-white rounded-lg border border-stone-200 space-y-1.5">
+                <h5 className="font-semibold text-stone-700 uppercase tracking-wider text-[11px] flex items-center gap-1.5">
+                  <HeartPulse className="w-3.5 h-3.5 text-emerald-800" strokeWidth={1.75} />
+                  4. Catatan Perkembangan & Tindak Lanjut Medis (Evaluation & Follow-Up)
+                </h5>
+                <p className="text-stone-900 leading-relaxed pl-5 whitespace-pre-line">{detailNote.progressFollowUp}</p>
+              </div>
+            </div>
+
+            {/* Signature & Officer Info */}
+            <div className="flex flex-col sm:flex-row justify-between items-start sm:items-end gap-3 pt-4 border-t border-stone-200 text-xs">
+              <div className="text-[11px] text-stone-500">
+                <span>Status Dokumen: <strong className="text-emerald-800 font-semibold">Tervalidasi & Terarsip</strong></span>
+              </div>
+              <div className="text-right">
+                <span className="text-[10px] text-stone-500 block uppercase tracking-wide">Perawat Penanggung Jawab:</span>
+                <span className="font-semibold text-stone-900 text-sm block mt-0.5">{detailNote.nurseName}</span>
+                <span className="text-[10px] text-stone-500">Klinik Keperawatan Holistik</span>
+              </div>
+            </div>
+
+            <div className="flex justify-end pt-2">
+              <button
+                type="button"
+                onClick={() => setDetailNote(null)}
+                className="px-5 py-2 rounded-lg bg-stone-100 hover:bg-stone-200 border border-stone-200 text-stone-800 font-medium text-xs transition-colors cursor-pointer"
+              >
+                Tutup
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* MODAL: Konfirmasi Hapus Catatan */}
+      {noteToDelete && (
+        <div className="fixed inset-0 bg-stone-900/60 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+          <div className="bg-white rounded-xl max-w-md w-full p-6 space-y-5 border border-stone-200">
+            <div className="flex items-start gap-3.5">
+              <div className="w-10 h-10 rounded-lg bg-rose-50 border border-rose-200 text-rose-700 flex items-center justify-center shrink-0">
+                <Trash2 className="w-5 h-5" strokeWidth={1.75} />
+              </div>
+              <div className="flex-1">
+                <h3 className="font-semibold tracking-tight text-stone-900 text-base">
+                  Hapus Catatan Perkembangan Pasien?
+                </h3>
+                <p className="text-xs text-stone-500 mt-0.5 leading-relaxed">
+                  Apakah Anda yakin ingin menghapus catatan kunjungan klinis ini? Catatan perkembangan ini akan dihapus dari riwayat pasien secara permanen.
+                </p>
+              </div>
+            </div>
+
+            <div className="bg-stone-50 rounded-xl p-4 border border-stone-200 text-xs space-y-2">
+              <div className="flex justify-between border-b border-stone-200 pb-1.5">
+                <span className="text-stone-500">Nama Pasien:</span>
+                <span className="font-semibold text-stone-900">{noteToDelete.patientName}</span>
+              </div>
+              <div className="flex justify-between border-b border-stone-200 pb-1.5">
+                <span className="text-stone-500">Tanggal Kunjungan:</span>
+                <span className="font-medium text-stone-800">{formatIndonesianDate(noteToDelete.visitDate)}</span>
+              </div>
+              <div className="flex justify-between">
+                <span className="text-stone-500">Jenis Terapi:</span>
+                <span className="font-medium text-emerald-800">{noteToDelete.therapyName}</span>
+              </div>
+            </div>
+
+            <div className="flex items-center justify-end gap-2.5 pt-2 border-t border-stone-200">
+              <button
+                type="button"
+                onClick={() => setNoteToDelete(null)}
+                className="px-4 py-2 rounded-lg bg-white border border-stone-300 hover:bg-stone-50 text-stone-700 font-medium text-xs transition-colors cursor-pointer"
+              >
+                Batal
+              </button>
+              <button
+                type="button"
+                onClick={handleConfirmDeleteNote}
+                className="px-4 py-2 rounded-lg bg-rose-700 hover:bg-rose-800 text-white font-medium text-xs transition-colors flex items-center gap-1.5 cursor-pointer"
+              >
+                <Trash2 className="w-4 h-4" strokeWidth={1.75} />
+                <span>Ya, Hapus Catatan</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+};
